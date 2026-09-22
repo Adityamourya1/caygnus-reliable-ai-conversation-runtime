@@ -1,103 +1,302 @@
 # Caygnus Product Engineering Challenge — Submission
 
-## Selected problem
+## Candidate
 
-**Problem 5 — Reliable AI Conversation Runtime**
-
-## Demo video
-
-TODO: add Loom / YouTube / Google Drive link.
+* **Name:** Mourya Aditya
+* **Email:** `adityamourya2026@gmail.com`
+* **GitHub:** https://github.com/Adityamourya1
+* **Selected problem:** Problem 5 — Reliable AI Conversation Runtime
+* **Demo video:** `[PASTE YOUR VIDEO LINK HERE]`
 
 ## Repository
 
-TODO: paste the public GitHub fork URL.
+https://github.com/Adityamourya1/caygnus-reliable-ai-conversation-runtime
 
-## Setup and verification
+## Run the project
+
+### Prerequisites
+
+* Python 3.10
+* Windows PowerShell commands below assume Python is available as `py -3.10`
+
+### Setup
 
 ```powershell
 py -3.10 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-pytest -q
-python demo.py
-python benchmark.py
 ```
 
-Expected setup time is a few minutes on a clean Python 3.10 environment.
+No API key or paid external model provider is required for the submitted deterministic scenarios.
 
-## Architecture
+### Run the demo
 
-The runtime is split into four responsibilities:
+```powershell
+python demo.py
+```
 
-1. `ConversationRuntime` owns orchestration and terminal-state transitions.
-2. `DeterministicPolicy` makes the pre-provider decision.
-3. `FakeProvider` implements a provider-shaped async stream for deterministic tests/demo.
-4. `Database` owns durable run and event history in SQLite.
+The demo demonstrates:
 
-The FastAPI layer is intentionally thin and presents the runtime as an SSE stream plus run-inspection endpoint.
+1. Successful streamed completion with ordered chunks
+2. Pre-response policy rejection using `BLOCK_ME`
+3. Provider failure after partial output
+4. Deterministic timeout after partial output
+5. Durable terminal state after closing and reopening the same SQLite database
 
-## Completed acceptance scenarios
+### Run the API
+
+```powershell
+uvicorn app.main:app --reload
+```
+
+Available endpoints include:
+
+* `GET /health`
+* `POST /turns/stream`
+* `GET /runs/{run_id}`
+
+Example deterministic stream:
+
+```powershell
+curl.exe -N -X POST http://127.0.0.1:8000/turns/stream `
+  -H "Content-Type: application/json" `
+  -d '{"user_input":"hello","mode":"success","chunks":["Hello ","from ","Caygnus."]}'
+```
+
+## Run the tests
+
+```powershell
+pytest -q
+```
+
+The focused test suite covers:
+
+* successful streaming and ordering
+* policy rejection before provider invocation
+* cancellation during streaming
+* provider failure after partial output
+* deterministic timeout
+* runtime timeout for a stalled provider
+* terminal-state idempotency
+* safe operational trace redaction
+
+## Acceptance scenarios and verification
 
 ### AC1 — Successful streamed turn
 
-The runtime persists ordered events and streams chunks in sequence. A successful run ends in `completed`, and only then is the assembled assistant response persisted.
+The runtime creates a stable `run_id`, persists ordered events, streams provider chunks in order, and transitions to `completed` only after the provider finishes successfully.
+
+The assembled assistant response is persisted only after successful completion.
 
 ### AC2 — Pre-response rejection
 
-Inputs containing the demo policy marker `BLOCK_ME` are rejected before the provider is invoked. Tests assert provider call count is zero.
+The deterministic policy gate runs before provider execution.
+
+Inputs containing `BLOCK_ME` are rejected with terminal state `rejected`, and the provider is not invoked.
 
 ### AC3 — Cancellation
 
-The runtime owns an `asyncio.Event` cancellation signal and checks it before committing the next chunk. Cancellation wins over completion and produces the `cancelled` terminal state.
+Cancellation is cooperative through an `asyncio.Event`.
+
+The runtime checks cancellation before committing the next chunk. A cancelled run reaches terminal state `cancelled` and is not represented as a successful completed response.
 
 ### AC4 — Timeout
 
-The deterministic fake provider can raise a controlled timeout after N chunks. The runtime records a safe provider error event and transitions to `timed_out` without persisting a successful assistant response.
+The deterministic provider can produce a controlled timeout after a configured number of chunks.
+
+The runtime maps this to `timed_out` and does not persist a successful assistant response.
 
 ### AC5 — Provider failure
 
-A provider error after partial output is recorded as an operational event and moves the run to `failed`. Partial chunks remain inspectable, but no successful assistant response is committed.
+A provider error after partial output moves the run to `failed`.
 
-### AC6 — Terminal-state race
+Previously emitted chunks remain inspectable as durable event history, but no successful assistant response is committed.
 
-Terminal transitions are guarded by a per-run asyncio lock and a durable state check. Once a terminal state is stored, later terminal transitions become no-ops.
+### AC6 — Terminal-state idempotency
+
+Terminal transitions are protected by a per-run asyncio lock and a durable state check.
+
+Once a terminal state has been stored, later terminal transitions are ignored.
 
 ### AC7 — Safe operational trace
 
-Trace payloads are intentionally narrow. Error events contain safe error codes rather than raw provider payloads. Fields such as `api_key`, `authorization`, `token`, `secret`, `prompt`, and `reasoning` are excluded.
+Operational payloads are intentionally narrow.
 
-## Verification benchmark
+Provider errors use safe error codes rather than raw provider payloads. Sensitive fields such as API keys, authorization headers, tokens, secrets, prompts, and hidden reasoning are excluded from operational trace payloads.
 
-`python benchmark.py` runs 10 deterministic iterations of each required scenario: success, rejection, cancellation, timeout, and provider failure. It reports terminal-state counts and checks exactly one terminal event, provider bypass on rejection, non-success persistence rules, and event ordering.
+## Problem-specific verification benchmark
 
-The benchmark focuses on the Problem 5 state-machine scenarios required by the brief. The demo and tests exercise partial-stream failure, timeout, cancellation, terminal-state protection, and durable state across a fresh database connection.
+Run:
 
-## Assumptions
+```powershell
+python benchmark.py
+```
 
-- One active run per conversation is enough for this focused exercise.
-- SQLite is the durable store for a single service process.
-- Partial assistant output is not a successful conversational turn and is therefore not committed as assistant response content.
-- Cancellation is cooperative through the provider interface.
+The benchmark runs 10 deterministic iterations of each scenario:
 
-## Limitations / production changes
+* success
+* policy rejection
+* cancellation
+* timeout
+* provider failure
 
-- Multiple service workers would require an external coordination primitive and compare-and-set state transitions in the database.
-- A production model provider would expose cancellation/timeout capabilities directly.
-- Event retention could be bounded and archived; clients would need a replay-expired response when their cursor is no longer available.
-- Authentication, authorization, multi-tenancy, rate limits, and external tracing are intentionally out of scope.
+It verifies:
 
-## Technology choice and trade-offs
+* exactly one terminal event
+* valid terminal state
+* provider bypass for rejection
+* no successful assistant persistence for rejection, cancellation, timeout, or failure
+* cancellation makes progress
+* strictly ordered and unique event sequence numbers
+* no events are emitted after the terminal event
 
-Python + FastAPI keeps the prototype close to my existing full-stack/AI experience while allowing a small asynchronous streaming API. SQLite was chosen because the challenge is single-process and correctness-focused; it provides durable state without introducing an unnecessary external dependency.
+### Observed benchmark result
 
-The main trade-off is deliberate simplicity: the repository is strong on state transitions, persistence, deterministic fakes, and tests, but it does not attempt distributed coordination or a real model integration.
+Paste the exact output from your local run below.
 
-## AI usage disclosure
+```text
+[PASTE ACTUAL OUTPUT OF: python benchmark.py]
+```
 
-AI tools were used as an implementation assistant for code structure, test-case generation, and documentation drafting. I reviewed the generated code, ran the automated tests and benchmark, and remain responsible for the design and submitted implementation.
+Do not manually change the observed counts.
+
+## Architecture and data flow
+
+```text
+Client / CLI
+     |
+     v
+FastAPI SSE layer
+     |
+     v
+ConversationRuntime
+     |
+     +----> DeterministicPolicy
+     |          |
+     |          +----> allow / reject before provider
+     |
+     +----> Provider interface
+     |          |
+     |          +----> FakeProvider
+     |
+     +----> SQLite Database
+                |
+                +----> runs
+                |
+                +----> events
+```
+
+`ConversationRuntime` owns orchestration, streaming, cancellation, timeout handling, and terminal-state semantics.
+
+`DeterministicPolicy` runs before provider invocation.
+
+The provider is isolated behind an asynchronous streaming interface so the runtime can be tested without depending on an external paid model API.
+
+SQLite stores durable run state and ordered event history.
+
+A successful run follows:
+
+```text
+accepted
+  -> policy
+  -> running
+  -> provider_started
+  -> chunk(s)
+  -> completed
+```
+
+A non-successful run terminates explicitly as:
+
+```text
+rejected
+cancelled
+timed_out
+failed
+```
+
+Partial streamed output remains inspectable through chunk events but is not treated as a successfully completed assistant response.
+
+## Technology choices
+
+### Python + FastAPI
+
+Python provides a compact asynchronous implementation suitable for an AI/backend runtime. FastAPI provides a thin HTTP/SSE layer while keeping the core correctness logic inside the runtime.
+
+### SQLite
+
+SQLite was chosen because the challenge is a focused single-process prototype and needs durable state without introducing an unnecessary external database dependency.
+
+### Deterministic FakeProvider
+
+A deterministic provider makes success, cancellation, timeout, and failure scenarios repeatable and keeps the tests independent of paid or unreliable external services.
+
+### Alternatives considered
+
+A real LLM provider would demonstrate model integration, but it would introduce credentials, network dependency, cost, and nondeterministic output without improving the core reliability behavior being evaluated.
+
+A distributed queue or broker would be appropriate for a larger production system, but would be disproportionate for this focused exercise.
+
+## Important decisions
+
+### 1. Explicit single terminal outcome
+
+The runtime treats `completed`, `rejected`, `cancelled`, `timed_out`, and `failed` as terminal states.
+
+Once one terminal state is durably recorded, later terminal transitions are ignored.
+
+### 2. Event history is separate from successful assistant output
+
+Chunks and operational events are durable, while the assembled assistant response is committed only on successful completion.
+
+This preserves useful recovery/debugging information without incorrectly treating partial output as a completed turn.
+
+### 3. Thin transport layer
+
+The FastAPI layer converts runtime events into SSE responses.
+
+The state machine and correctness rules remain inside `ConversationRuntime`, where they can be tested directly without HTTP.
+
+## Assumptions and limitations
+
+* One active run per conversation is sufficient for this focused exercise.
+* SQLite is used as the durable store for a single service process.
+* Cancellation is cooperative through the provider interface.
+* Partial assistant output is not considered a successful conversational turn.
+* The provider is deterministic and intentionally not a real model integration.
+* Authentication, authorization, multi-tenancy, rate limiting, distributed coordination, and production infrastructure are out of scope.
+* Event retention is currently unbounded for the prototype.
+
+## Production and scale
+
+The submitted implementation is intentionally single-process and correctness-focused.
+
+For production, I would first:
+
+1. Replace process-local terminal locking with database-level transactional compare-and-set state transitions so multiple workers cannot produce conflicting terminal outcomes.
+2. Add external coordination where distributed execution requires it.
+3. Use a real provider adapter with native cancellation and request deadlines.
+4. Add metrics, tracing, alerting, bounded event retention, and replay-expiration handling.
+5. Add authentication, authorization, rate limits, and multi-tenancy.
+
+These are proposed production improvements, not claims about capabilities already implemented in this prototype.
+
+## AI usage
+
+AI tools were used as implementation assistants for code structure, test-case generation, debugging support, and documentation drafting.
+
+I reviewed and adapted the generated output and verified behavior with focused automated tests and the deterministic benchmark.
+
+I remain responsible for the submitted code, architecture, and explanations and can explain or modify the implementation during follow-up discussion.
 
 ## Credibility note
 
-I previously built and deployed full-stack/AI projects including SportsConnect, a sports social platform with profiles, posts, leagues, role-based interactions, REST APIs, and AI recommendations, and a recommendation engine using Python/FastAPI. These projects informed the API, async runtime, data persistence, and product-oriented decomposition used here.
+I previously built and deployed full-stack/AI projects including SportsConnect, a sports social platform with profiles, posts, leagues, role-based interactions, REST APIs, and AI-powered recommendations.
 
-Public portfolio/repositories: https://github.com/Adityamourya1
+My contribution included backend/API development, data persistence, AI/recommendation functionality, and deployment integration.
+
+This work involved coordinating frontend and backend components and external services, and influenced the decomposition used in this challenge: keep transport concerns thin, isolate runtime/orchestration logic, define provider boundaries, and persist important state explicitly.
+
+Public evidence:
+
+* GitHub: https://github.com/Adityamourya1
+* SportsConnect repository: https://github.com/Adityamourya1/sportsconnect
